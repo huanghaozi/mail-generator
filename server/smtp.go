@@ -188,11 +188,19 @@ func forwardEmailDirectly(cfg *Config, to string, body string) error {
 		address := mx.Host + ":25"
 		log.Printf("Attempting direct delivery to %s (%s)", address, to)
 		
-		// Connect to the remote SMTP server
-		c, err := smtp.Dial(address)
+		// Connect to the remote SMTP server with timeout
+		conn, err := net.DialTimeout("tcp", address, 10*time.Second)
 		if err != nil {
 			lastErr = err
 			log.Printf("Failed to connect to %s: %v", address, err)
+			continue
+		}
+
+		c, err := smtp.NewClient(conn, mx.Host)
+		if err != nil {
+			conn.Close()
+			lastErr = err
+			log.Printf("Failed to create SMTP client for %s: %v", address, err)
 			continue
 		}
 		
