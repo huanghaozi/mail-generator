@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/smtp"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -86,13 +88,23 @@ func (s *Session) Data(r io.Reader) error {
 
 	// Forward asynchronously
 	go func(l Log, rule Account, content string, cfg *Config) {
-		err := forwardEmail(cfg, rule.ForwardTo, content)
+		var err error
+		if cfg.SMTPRelayHost != "" {
+			// Relay Mode
+			err = forwardEmailViaRelay(cfg, rule.ForwardTo, content)
+		} else {
+			// Direct Send Mode
+			err = forwardEmailDirectly(cfg, rule.ForwardTo, content)
+		}
+
 		status := "success"
 		errMsg := ""
 		if err != nil {
 			status = "failed"
 			errMsg = err.Error()
-			log.Printf("Failed to forward email: %v", err)
+			log.Printf("Failed to forward email to %s: %v", rule.ForwardTo, err)
+		} else {
+			log.Printf("Successfully forwarded email to %s", rule.ForwardTo)
 		}
 
 		// Update Log
@@ -134,11 +146,8 @@ func extractSubject(body string) string {
 	return subject
 }
 
-func forwardEmail(cfg *Config, to string, body string) error {
-	if cfg.SMTPRelayHost == "" {
-		return errors.New("SMTP relay not configured")
-	}
-
+// forwardEmailViaRelay sends email using a configured SMTP relay (e.g. Gmail)
+func forwardEmailViaRelay(cfg *Config, to string, body string) error {
 	// Prepare authentication
 	var auth smtp.Auth
 	if cfg.SMTPRelayUser != "" && cfg.SMTPRelayPass != "" {
@@ -147,22 +156,91 @@ func forwardEmail(cfg *Config, to string, body string) error {
 
 	// Address to connect to
 	addr := fmt.Sprintf("%s:%s", cfg.SMTPRelayHost, cfg.SMTPRelayPort)
+	
+	return smtp.SendMail(addr, auth, cfg.DefaultEnvelope, []string{to}, []byte(body))
+}
 
-	// Determine Envelope From
-	// Using a default fixed envelope sender avoids SPF issues for simple forwarding
-	// The original "From" header inside `body` remains unchanged, preserving the sender identity in the mail client.
-	envelopeFrom := cfg.DefaultEnvelope 
+// forwardEmailDirectly looks up MX records and delivers mail directly
+func forwardEmailDirectly(cfg *Config, to string, body string) error {
+	parts := strings.Split(to, "@")
+	if len(parts) != 2 {
+		return errors.New("invalid to address")
+	}
+	domain := parts[1]
 
-	// Send the email
-	// Note: We send the original body as-is (headers + content).
-	// Ideally we might want to prepend "Resent-From" or similar, but sending raw is often fine for personal forwarding.
-	err := smtp.SendMail(addr, auth, envelopeFrom, []string{to}, []byte(body))
+	// 1. Lookup MX records
+	mxs, err := net.LookupMX(domain)
 	if err != nil {
-		return err
+		return fmt.Errorf("mx lookup failed: %v", err)
+	}
+	if len(mxs) == 0 {
+		return errors.New("no mx records found")
 	}
 
-	log.Printf("Successfully forwarded email to %s via %s", to, cfg.SMTPRelayHost)
-	return nil
+	// Sort by preference
+	sort.Slice(mxs, func(i, j int) bool {
+		return mxs[i].Pref < mxs[j].Pref
+	})
+
+	// 2. Try each MX record
+	var lastErr error
+	for _, mx := range mxs {
+		address := mx.Host + ":25"
+		log.Printf("Attempting direct delivery to %s (%s)", address, to)
+		
+		// Connect to the remote SMTP server
+		c, err := smtp.Dial(address)
+		if err != nil {
+			lastErr = err
+			log.Printf("Failed to connect to %s: %v", address, err)
+			continue
+		}
+		
+		// Set the sender (Envelope From)
+		if err := c.Mail(cfg.DefaultEnvelope); err != nil {
+			lastErr = err
+			c.Close()
+			continue
+		}
+		
+		// Set the recipient
+		if err := c.Rcpt(to); err != nil {
+			lastErr = err
+			c.Close()
+			continue
+		}
+		
+		// Send the data
+		wc, err := c.Data()
+		if err != nil {
+			lastErr = err
+			c.Close()
+			continue
+		}
+		
+		_, err = wc.Write([]byte(body))
+		if err != nil {
+			lastErr = err
+			wc.Close()
+			c.Close()
+			continue
+		}
+		
+		err = wc.Close()
+		if err != nil {
+			lastErr = err
+			c.Close()
+			continue
+		}
+		
+		c.Quit()
+		return nil // Success
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("all mx servers failed, last error: %v", lastErr)
+	}
+	return errors.New("delivery failed")
 }
 
 func StartSMTPServer(cfg *Config) {
@@ -180,4 +258,3 @@ func StartSMTPServer(cfg *Config) {
 		log.Fatal(err)
 	}
 }
-

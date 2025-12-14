@@ -111,11 +111,17 @@ Environment="PASSWORD=your_secure_password"
 Environment="DB_FILE=/opt/mail-gen/mail.db"
 # JWT 密钥
 Environment="JWT_SECRET=your_random_secret_string"
-# SMTP 中继配置 (必填，否则无法发信)
-Environment="SMTP_RELAY_HOST=smtp.gmail.com"
-Environment="SMTP_RELAY_PORT=587"
-Environment="SMTP_RELAY_USER=yourname@gmail.com"
-Environment="SMTP_RELAY_PASS=your_app_password"
+# SMTP 发信模式 (任选其一)
+
+# 模式 A: 使用中继 (Relay Mode) - 推荐家用宽带或云主机
+# Environment="SMTP_RELAY_HOST=smtp.gmail.com"
+# Environment="SMTP_RELAY_PORT=587"
+# Environment="SMTP_RELAY_USER=yourname@gmail.com"
+# Environment="SMTP_RELAY_PASS=your_app_password"
+
+# 模式 B: 直连发送 (Direct Mode) - 推荐 VPS (需开放 25 端口 + PTR 记录)
+# 留空 SMTP_RELAY_HOST 即开启直连模式
+Environment="SMTP_RELAY_HOST="
 Environment="DEFAULT_ENVELOPE=postmaster@yourdomain.com"
 
 [Install]
@@ -177,8 +183,22 @@ sudo systemctl reload nginx
 | `PASSWORD` | admin123 | 管理后台登录密码 |
 | `DB_FILE` | mail.db | SQLite 数据库路径 |
 | `JWT_SECRET` | very-secret-key | JWT 签名密钥 (生产环境请务必修改) |
-| `SMTP_RELAY_HOST` | - | 外部 SMTP 中继服务器地址 (如 smtp.gmail.com) |
+| `SMTP_RELAY_HOST` | - | 外部 SMTP 中继服务器地址。**留空则启用直连发送模式** |
 | `SMTP_RELAY_PORT` | 587 | 外部 SMTP 端口 |
 | `SMTP_RELAY_USER` | - | 外部 SMTP 账号 |
 | `SMTP_RELAY_PASS` | - | 外部 SMTP 密码/应用密码 |
 | `DEFAULT_ENVELOPE`| postmaster@localhost | 转发邮件时使用的发件人 (Envelope From) |
+
+## 发信模式说明
+
+### 1. 中继模式 (Relay Mode)
+通过 Gmail、Outlook 等第三方服务转发邮件。
+- **优点**: 配置简单，无需担心 IP 信誉、PTR 记录，不容易进垃圾箱。
+- **缺点**: 受限于第三方服务的发送额度。
+- **配置**: 填写 `SMTP_RELAY_HOST` 及相关认证信息。
+
+### 2. 直连模式 (Direct Mode)
+直接连接目标邮件服务器发送。
+- **优点**: 自主可控，无额度限制。
+- **缺点**: 要求高。需要服务器**开放 TCP 25 端口**（出站），必须配置 **PTR 记录** (反向解析) 和 SPF 记录，否则极易被拒收。
+- **配置**: 将 `SMTP_RELAY_HOST` 留空即可开启。
