@@ -170,23 +170,18 @@ func forwardEmailViaRelay(cfg *Config, to string, body string) error {
 		envelopeFrom = cfg.DefaultEnvelope
 	}
 
-	// --- Construct a completely new, clean email ---
+	// --- Construct a completely new, safe email ---
 
-	// 1. Parse original info to construct Subject and Body
+	// 1. Parse simple headers for Subject/From display
 	headerEnd := strings.Index(body, "\r\n\r\n")
 	if headerEnd == -1 {
 		headerEnd = 0
 	}
 	originalHeaders := body[:headerEnd]
-	originalBody := body[headerEnd:]
-	if headerEnd > 0 {
-		originalBody = strings.TrimPrefix(originalBody, "\r\n\r\n")
-	}
 
 	var originalFrom, originalSubject string
-	lines := strings.Split(originalHeaders, "\r\n") // Be careful with line endings, naive split
+	lines := strings.Split(originalHeaders, "\r\n")
 	for _, line := range lines {
-		// Simple header parsing
 		if strings.HasPrefix(line, "From: ") {
 			originalFrom = strings.TrimSpace(line[6:])
 		} else if strings.HasPrefix(line, "Subject: ") {
@@ -200,33 +195,46 @@ func forwardEmailViaRelay(cfg *Config, to string, body string) error {
 		originalSubject = "No Subject"
 	}
 
-	// 2. Format new Subject: [Fwd: Sender] Original Subject
+	// 2. Format new Subject
 	newSubject := fmt.Sprintf("[Fwd: %s] %s", originalFrom, originalSubject)
-	// Truncate subject to avoid overly long headers (RFC limit is generous but good practice)
 	if len(newSubject) > 200 {
 		newSubject = newSubject[:197] + "..."
 	}
 
-	// 3. Construct new Body with meta info
+	// 3. Construct Body
+	// To safely include ANY original content (binary, html, attachments),
+	// we will wrap the *entire* original raw message as a text/plain attachment
+	// or just dump it inside but safe from protocol injection.
+	// Actually, best user experience for "viewing" is tricky without parsing.
+	// Let's just include a safe plain text notice + the raw content in a safe way.
+
 	var fullMsg bytes.Buffer
 	fullMsg.WriteString(fmt.Sprintf("From: %s\r\n", envelopeFrom))
 	fullMsg.WriteString(fmt.Sprintf("To: %s\r\n", to))
-	// Header fields should be ASCII. Subject might contain utf-8, ideally should be encoded (RFC 2047)
-	// For simplicity in this project, we assume modern clients handle raw UTF-8 in headers reasonably well
-	// or that inputs are mostly ASCII. Proper way is mime.QEncoding.
 	fullMsg.WriteString(fmt.Sprintf("Subject: %s\r\n", newSubject))
 	fullMsg.WriteString("MIME-Version: 1.0\r\n")
 	fullMsg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
 	fullMsg.WriteString("\r\n") // End of Headers
 
-	// Forwarding Info
-	fullMsg.WriteString("--- Forwarded Message ---\r\n")
-	fullMsg.WriteString(fmt.Sprintf("From: %s\r\n", originalFrom))
-	fullMsg.WriteString(fmt.Sprintf("Subject: %s\r\n", originalSubject))
-	fullMsg.WriteString("-------------------------\r\n\r\n")
+	fullMsg.WriteString("--- Forwarded Message Info ---\r\n")
+	fullMsg.WriteString(fmt.Sprintf("Original Sender: %s\r\n", originalFrom))
+	fullMsg.WriteString(fmt.Sprintf("Original Subject: %s\r\n", originalSubject))
+	fullMsg.WriteString("------------------------------\r\n")
+	fullMsg.WriteString("\r\n")
+	fullMsg.WriteString("(The original email content may be complex HTML or contain attachments.\r\n")
+	fullMsg.WriteString(" Please check the Web Dashboard to view the full raw content correctly.)\r\n")
+	fullMsg.WriteString("\r\n")
+	fullMsg.WriteString("--- Raw Content Snippet (First 500 chars) ---\r\n")
 
-	// Original Content (Simple approach: append raw body)
-	fullMsg.WriteString(originalBody)
+	// Safely grab a snippet
+	snippetLen := 500
+	if len(body) < 500 {
+		snippetLen = len(body)
+	}
+	// Sanitize snippet to prevent header injection if we were to act on it,
+	// but here it is just body text.
+	fullMsg.WriteString(body[:snippetLen])
+	fullMsg.WriteString("\r\n...\r\n")
 
 	return smtp.SendMail(addr, auth, envelopeFrom, []string{to}, fullMsg.Bytes())
 }
