@@ -164,7 +164,48 @@ func forwardEmailViaRelay(cfg *Config, to string, body string) error {
 		envelopeFrom = cfg.DefaultEnvelope
 	}
 
-	return smtp.SendMail(addr, auth, envelopeFrom, []string{to}, []byte(body))
+	// Rewrite headers to avoid "550 Header mismatch" errors
+	// 1. Parse existing headers
+	headerEnd := strings.Index(body, "\r\n\r\n")
+	if headerEnd == -1 {
+		// Fallback for simple bodies
+		headerEnd = 0
+	}
+	
+	originalHeaders := body[:headerEnd]
+	originalBody := body[headerEnd:]
+	
+	// 2. Extract original From to use as Reply-To
+	var originalFrom string
+	lines := strings.Split(originalHeaders, "\r\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "From: ") {
+			originalFrom = strings.TrimSpace(line[6:])
+			break
+		}
+	}
+
+	// 3. Construct new headers
+	// We replace the From header to match our relay account, but keep Reply-To pointing to original sender
+	var newHeaders bytes.Buffer
+	newHeaders.WriteString(fmt.Sprintf("From: %s\r\n", envelopeFrom))
+	newHeaders.WriteString(fmt.Sprintf("To: %s\r\n", to))
+	if originalFrom != "" {
+		newHeaders.WriteString(fmt.Sprintf("Reply-To: %s\r\n", originalFrom))
+	}
+	// Add other critical headers like Subject
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Subject:") || strings.HasPrefix(line, "Date:") || strings.HasPrefix(line, "MIME-Version:") || strings.HasPrefix(line, "Content-Type:") {
+			newHeaders.WriteString(line + "\r\n")
+		}
+	}
+	newHeaders.WriteString("\r\n") // End of headers
+	
+	// Combine new headers with original body
+	finalBody := newHeaders.Bytes()
+	finalBody = append(finalBody, []byte(originalBody)...)
+
+	return smtp.SendMail(addr, auth, envelopeFrom, []string{to}, finalBody)
 }
 
 // forwardEmailDirectly looks up MX records and delivers mail directly
