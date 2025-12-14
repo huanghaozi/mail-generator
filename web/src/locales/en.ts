@@ -49,6 +49,8 @@ export default {
     subject: 'Subject',
     status: 'Status',
     time: 'Time',
+    viewContent: 'View Content',
+    contentTitle: 'Email Content',
   }
 }
 

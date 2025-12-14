@@ -12,8 +12,15 @@
         <template v-if="column.key === 'status'">
           <a-tag :color="record.status === 'success' ? 'green' : 'red'">{{ record.status }}</a-tag>
         </template>
+        <template v-if="column.key === 'action'">
+          <a @click="showContent(record)">{{ $t('log.viewContent') }}</a>
+        </template>
       </template>
     </a-table>
+
+    <a-modal v-model:open="open" :title="$t('log.contentTitle')" width="800px" :footer="null">
+      <pre style="white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto;">{{ currentContent }}</pre>
+    </a-modal>
   </div>
 </template>
 
@@ -29,6 +36,8 @@ const pagination = ref({
   pageSize: 20,
   total: 0,
 });
+const open = ref(false);
+const currentContent = ref('');
 
 const columns = computed(() => [
   { title: t('common.id'), dataIndex: 'id', key: 'id' },
@@ -37,6 +46,7 @@ const columns = computed(() => [
   { title: t('log.subject'), dataIndex: 'subject', key: 'subject' },
   { title: t('log.status'), dataIndex: 'status', key: 'status' },
   { title: t('log.time'), dataIndex: 'created_at', key: 'created_at' },
+  { title: t('common.action'), key: 'action' },
 ]);
 
 const fetchLogs = async () => {
@@ -54,6 +64,11 @@ const handleTableChange = (pag: any) => {
   pagination.value.current = pag.current;
   pagination.value.pageSize = pag.pageSize;
   fetchLogs();
+};
+
+const showContent = (record: any) => {
+  currentContent.value = record.content || 'No Content';
+  open.value = true;
 };
 
 onMounted(fetchLogs);

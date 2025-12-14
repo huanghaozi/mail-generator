@@ -34,7 +34,8 @@ type Log struct {
 	From      string    `gorm:"index" json:"from"`
 	To        string    `gorm:"index" json:"to"`
 	Subject   string    `json:"subject"`
-	Status    string    `json:"status"` // "success", "failed"
+	Content   string    `json:"content"` // Store email content (truncated if too large)
+	Status    string    `json:"status"`  // "success", "failed"
 	Error     string    `json:"error,omitempty"`
 	ClientIP  string    `json:"client_ip"`
 	CreatedAt time.Time `gorm:"index" json:"created_at"`
@@ -55,4 +56,3 @@ func InitDB(cfg *Config) {
 		panic("failed to migrate database: " + err.Error())
 	}
 }
-

@@ -76,10 +76,17 @@ func (s *Session) Data(r io.Reader) error {
 	data := buf.String()
 
 	// Log the attempt
+	// Limit content length for DB
+	contentToLog := data
+	if len(contentToLog) > 10000 {
+		contentToLog = contentToLog[:10000] + "...(truncated)"
+	}
+
 	logEntry := Log{
 		From:      s.From,
 		To:        s.To,
 		Subject:   extractSubject(data),
+		Content:   contentToLog,
 		Status:    "processing",
 		ClientIP:  "", // Context not passed easily in this lib
 		CreatedAt: time.Now(),
@@ -135,7 +142,7 @@ func extractSubject(body string) string {
 		headerEnd = len(body)
 	}
 	headers := body[:headerEnd]
-	
+
 	lines := strings.Split(headers, "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "Subject: ") || strings.HasPrefix(line, "subject: ") {
@@ -156,56 +163,72 @@ func forwardEmailViaRelay(cfg *Config, to string, body string) error {
 
 	// Address to connect to
 	addr := fmt.Sprintf("%s:%s", cfg.SMTPRelayHost, cfg.SMTPRelayPort)
-	
+
 	// When using relay, we MUST use the auth user as Envelope From (MAIL FROM)
-	// Many SMTP providers (like 163, Gmail) require MAIL FROM == Auth User
 	envelopeFrom := cfg.SMTPRelayUser
 	if envelopeFrom == "" {
 		envelopeFrom = cfg.DefaultEnvelope
 	}
 
-	// Rewrite headers to avoid "550 Header mismatch" errors
-	// 1. Parse existing headers
+	// --- Construct a completely new, clean email ---
+
+	// 1. Parse original info to construct Subject and Body
 	headerEnd := strings.Index(body, "\r\n\r\n")
 	if headerEnd == -1 {
-		// Fallback for simple bodies
 		headerEnd = 0
 	}
-	
 	originalHeaders := body[:headerEnd]
 	originalBody := body[headerEnd:]
-	
-	// 2. Extract original From to use as Reply-To
-	var originalFrom string
-	lines := strings.Split(originalHeaders, "\r\n")
+	if headerEnd > 0 {
+		originalBody = strings.TrimPrefix(originalBody, "\r\n\r\n")
+	}
+
+	var originalFrom, originalSubject string
+	lines := strings.Split(originalHeaders, "\r\n") // Be careful with line endings, naive split
 	for _, line := range lines {
+		// Simple header parsing
 		if strings.HasPrefix(line, "From: ") {
 			originalFrom = strings.TrimSpace(line[6:])
-			break
+		} else if strings.HasPrefix(line, "Subject: ") {
+			originalSubject = strings.TrimSpace(line[9:])
 		}
 	}
-
-	// 3. Construct new headers
-	// We replace the From header to match our relay account, but keep Reply-To pointing to original sender
-	var newHeaders bytes.Buffer
-	newHeaders.WriteString(fmt.Sprintf("From: %s\r\n", envelopeFrom))
-	newHeaders.WriteString(fmt.Sprintf("To: %s\r\n", to))
-	if originalFrom != "" {
-		newHeaders.WriteString(fmt.Sprintf("Reply-To: %s\r\n", originalFrom))
+	if originalFrom == "" {
+		originalFrom = "Unknown Sender"
 	}
-	// Add other critical headers like Subject
-	for _, line := range lines {
-		if strings.HasPrefix(line, "Subject:") || strings.HasPrefix(line, "Date:") || strings.HasPrefix(line, "MIME-Version:") || strings.HasPrefix(line, "Content-Type:") {
-			newHeaders.WriteString(line + "\r\n")
-		}
+	if originalSubject == "" {
+		originalSubject = "No Subject"
 	}
-	newHeaders.WriteString("\r\n") // End of headers
-	
-	// Combine new headers with original body
-	finalBody := newHeaders.Bytes()
-	finalBody = append(finalBody, []byte(originalBody)...)
 
-	return smtp.SendMail(addr, auth, envelopeFrom, []string{to}, finalBody)
+	// 2. Format new Subject: [Fwd: Sender] Original Subject
+	newSubject := fmt.Sprintf("[Fwd: %s] %s", originalFrom, originalSubject)
+	// Truncate subject to avoid overly long headers (RFC limit is generous but good practice)
+	if len(newSubject) > 200 {
+		newSubject = newSubject[:197] + "..."
+	}
+
+	// 3. Construct new Body with meta info
+	var fullMsg bytes.Buffer
+	fullMsg.WriteString(fmt.Sprintf("From: %s\r\n", envelopeFrom))
+	fullMsg.WriteString(fmt.Sprintf("To: %s\r\n", to))
+	// Header fields should be ASCII. Subject might contain utf-8, ideally should be encoded (RFC 2047)
+	// For simplicity in this project, we assume modern clients handle raw UTF-8 in headers reasonably well
+	// or that inputs are mostly ASCII. Proper way is mime.QEncoding.
+	fullMsg.WriteString(fmt.Sprintf("Subject: %s\r\n", newSubject))
+	fullMsg.WriteString("MIME-Version: 1.0\r\n")
+	fullMsg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	fullMsg.WriteString("\r\n") // End of Headers
+
+	// Forwarding Info
+	fullMsg.WriteString("--- Forwarded Message ---\r\n")
+	fullMsg.WriteString(fmt.Sprintf("From: %s\r\n", originalFrom))
+	fullMsg.WriteString(fmt.Sprintf("Subject: %s\r\n", originalSubject))
+	fullMsg.WriteString("-------------------------\r\n\r\n")
+
+	// Original Content (Simple approach: append raw body)
+	fullMsg.WriteString(originalBody)
+
+	return smtp.SendMail(addr, auth, envelopeFrom, []string{to}, fullMsg.Bytes())
 }
 
 // forwardEmailDirectly looks up MX records and delivers mail directly
@@ -235,7 +258,7 @@ func forwardEmailDirectly(cfg *Config, to string, body string) error {
 	for _, mx := range mxs {
 		address := mx.Host + ":25"
 		log.Printf("Attempting direct delivery to %s (%s)", address, to)
-		
+
 		// Connect to the remote SMTP server with timeout
 		conn, err := net.DialTimeout("tcp", address, 10*time.Second)
 		if err != nil {
@@ -251,21 +274,21 @@ func forwardEmailDirectly(cfg *Config, to string, body string) error {
 			log.Printf("Failed to create SMTP client for %s: %v", address, err)
 			continue
 		}
-		
+
 		// Set the sender (Envelope From)
 		if err := c.Mail(cfg.DefaultEnvelope); err != nil {
 			lastErr = err
 			c.Close()
 			continue
 		}
-		
+
 		// Set the recipient
 		if err := c.Rcpt(to); err != nil {
 			lastErr = err
 			c.Close()
 			continue
 		}
-		
+
 		// Send the data
 		wc, err := c.Data()
 		if err != nil {
@@ -273,7 +296,7 @@ func forwardEmailDirectly(cfg *Config, to string, body string) error {
 			c.Close()
 			continue
 		}
-		
+
 		_, err = wc.Write([]byte(body))
 		if err != nil {
 			lastErr = err
@@ -281,14 +304,14 @@ func forwardEmailDirectly(cfg *Config, to string, body string) error {
 			c.Close()
 			continue
 		}
-		
+
 		err = wc.Close()
 		if err != nil {
 			lastErr = err
 			c.Close()
 			continue
 		}
-		
+
 		c.Quit()
 		return nil // Success
 	}

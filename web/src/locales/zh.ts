@@ -49,6 +49,8 @@ export default {
     subject: '主题',
     status: '状态',
     time: '时间',
+    viewContent: '查看内容',
+    contentTitle: '邮件内容',
   }
 }
 
