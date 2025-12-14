@@ -157,7 +157,14 @@ func forwardEmailViaRelay(cfg *Config, to string, body string) error {
 	// Address to connect to
 	addr := fmt.Sprintf("%s:%s", cfg.SMTPRelayHost, cfg.SMTPRelayPort)
 	
-	return smtp.SendMail(addr, auth, cfg.DefaultEnvelope, []string{to}, []byte(body))
+	// When using relay, we MUST use the auth user as Envelope From (MAIL FROM)
+	// Many SMTP providers (like 163, Gmail) require MAIL FROM == Auth User
+	envelopeFrom := cfg.SMTPRelayUser
+	if envelopeFrom == "" {
+		envelopeFrom = cfg.DefaultEnvelope
+	}
+
+	return smtp.SendMail(addr, auth, envelopeFrom, []string{to}, []byte(body))
 }
 
 // forwardEmailDirectly looks up MX records and delivers mail directly
