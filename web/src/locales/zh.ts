@@ -35,10 +35,10 @@ export default {
   account: {
     addTitle: '添加转发规则',
     pattern: '匹配模式 (正则)',
-    patternPlaceholder: '^.*{"@"}example\\.com$',
-    patternTip: '使用正则表达式。例如：^support{"@"}.*$ 或 ^.*{"@"}mydomain\\.com$',
+    patternPlaceholder: '^.*{\'@\'}example\\.com$',
+    patternTip: '使用正则表达式。例如：^support{\'@\'}.*$ 或 ^.*{\'@\'}mydomain\\.com$',
     forwardTo: '转发至',
-    forwardToPlaceholder: 'me{"@"}gmail.com',
+    forwardToPlaceholder: 'me{\'@\'}gmail.com',
     hitCount: '命中次数',
     added: '规则已添加',
     deleted: '规则已删除',

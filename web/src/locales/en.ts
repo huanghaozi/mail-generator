@@ -35,10 +35,10 @@ export default {
   account: {
     addTitle: 'Add Account Rule',
     pattern: 'Pattern (Regex)',
-    patternPlaceholder: '^.*{"@"}example\\.com$',
-    patternTip: 'Use Regex. E.g. ^support{"@"}.*$ or ^.*{"@"}mydomain\\.com$',
+    patternPlaceholder: '^.*{\'@\'}example\\.com$',
+    patternTip: 'Use Regex. E.g. ^support{\'@\'}.*$ or ^.*{\'@\'}mydomain\\.com$',
     forwardTo: 'Forward To',
-    forwardToPlaceholder: 'me{"@"}gmail.com',
+    forwardToPlaceholder: 'me{\'@\'}gmail.com',
     hitCount: 'Hit Count',
     added: 'Account rule added',
     deleted: 'Account deleted',
