@@ -106,21 +106,42 @@ func (s *Session) Data(r io.Reader) error {
 
 	// Forward asynchronously
 	go func(l Log, rule Account, originalFrom string, decodedSubj string, body string, cfg *Config) {
-		var err error
-		if cfg.SMTPRelayHost != "" {
-			err = forwardEmailViaRelay(cfg, rule.ForwardTo, originalFrom, decodedSubj, body)
-		} else {
-			err = forwardEmailDirectly(cfg, rule.ForwardTo, originalFrom, decodedSubj, body)
+		// Split multiple recipients
+		recipients := strings.Split(rule.ForwardTo, ",")
+		var allErrors []string
+		successCount := 0
+
+		for _, rcpt := range recipients {
+			rcpt = strings.TrimSpace(rcpt)
+			if rcpt == "" {
+				continue
+			}
+
+			var err error
+			if cfg.SMTPRelayHost != "" {
+				err = forwardEmailViaRelay(cfg, rcpt, originalFrom, decodedSubj, body)
+			} else {
+				err = forwardEmailDirectly(cfg, rcpt, originalFrom, decodedSubj, body)
+			}
+
+			if err != nil {
+				log.Printf("Failed to forward email to %s: %v", rcpt, err)
+				allErrors = append(allErrors, fmt.Sprintf("%s: %v", rcpt, err))
+			} else {
+				log.Printf("Successfully forwarded email to %s", rcpt)
+				successCount++
+			}
 		}
 
 		status := "success"
 		errMsg := ""
-		if err != nil {
-			status = "failed"
-			errMsg = err.Error()
-			log.Printf("Failed to forward email to %s: %v", rule.ForwardTo, err)
-		} else {
-			log.Printf("Successfully forwarded email to %s", rule.ForwardTo)
+		if len(allErrors) > 0 {
+			if successCount == 0 {
+				status = "failed"
+			} else {
+				status = "partial"
+			}
+			errMsg = strings.Join(allErrors, "; ")
 		}
 
 		DB.Model(&l).Updates(map[string]interface{}{
@@ -357,7 +378,7 @@ func stripHTML(s string) string {
 
 // forwardEmailViaRelay sends email using a configured SMTP relay (e.g. 163.com)
 func forwardEmailViaRelay(cfg *Config, to string, originalFrom string, subject string, textBody string) error {
-	addr := fmt.Sprintf("%s:%s", cfg.SMTPRelayHost, cfg.SMTPRelayPort)
+	addr := net.JoinHostPort(cfg.SMTPRelayHost, cfg.SMTPRelayPort)
 
 	envelopeFrom := cfg.SMTPRelayUser
 	if envelopeFrom == "" {
@@ -430,10 +451,17 @@ func forwardEmailViaRelay(cfg *Config, to string, originalFrom string, subject s
 		return fmt.Errorf("MAIL FROM failed: %v", err)
 	}
 
-	// RCPT TO
-	log.Printf("[Relay] RCPT TO: %s", to)
-	if err := c.Rcpt(to); err != nil {
-		return fmt.Errorf("RCPT TO failed: %v", err)
+	// RCPT TO - support multiple recipients separated by comma
+	recipients := strings.Split(to, ",")
+	for _, rcpt := range recipients {
+		rcpt = strings.TrimSpace(rcpt)
+		if rcpt == "" {
+			continue
+		}
+		log.Printf("[Relay] RCPT TO: %s", rcpt)
+		if err := c.Rcpt(rcpt); err != nil {
+			return fmt.Errorf("RCPT TO %s failed: %v", rcpt, err)
+		}
 	}
 
 	// DATA
@@ -504,7 +532,7 @@ func forwardEmailDirectly(cfg *Config, to string, originalFrom string, subject s
 
 	var lastErr error
 	for _, mx := range mxs {
-		address := mx.Host + ":25"
+		address := net.JoinHostPort(strings.TrimSuffix(mx.Host, "."), "25")
 		log.Printf("Attempting direct delivery to %s (%s)", address, to)
 
 		conn, err := net.DialTimeout("tcp", address, 10*time.Second)
