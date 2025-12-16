@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -345,21 +346,17 @@ func stripHTML(s string) string {
 	re := regexp.MustCompile(`<[^>]*>`)
 	result := re.ReplaceAllString(s, "")
 	// Decode common HTML entities
+	// NOTE: &amp; MUST be replaced FIRST so nested entities like &amp;nbsp; decode correctly
+	result = strings.ReplaceAll(result, "&amp;", "&")
 	result = strings.ReplaceAll(result, "&nbsp;", " ")
 	result = strings.ReplaceAll(result, "&lt;", "<")
 	result = strings.ReplaceAll(result, "&gt;", ">")
-	result = strings.ReplaceAll(result, "&amp;", "&")
 	result = strings.ReplaceAll(result, "&quot;", "\"")
 	return strings.TrimSpace(result)
 }
 
-// forwardEmailViaRelay sends email using a configured SMTP relay
+// forwardEmailViaRelay sends email using a configured SMTP relay (e.g. 163.com)
 func forwardEmailViaRelay(cfg *Config, to string, originalFrom string, subject string, textBody string) error {
-	var auth smtp.Auth
-	if cfg.SMTPRelayUser != "" && cfg.SMTPRelayPass != "" {
-		auth = smtp.PlainAuth("", cfg.SMTPRelayUser, cfg.SMTPRelayPass, cfg.SMTPRelayHost)
-	}
-
 	addr := fmt.Sprintf("%s:%s", cfg.SMTPRelayHost, cfg.SMTPRelayPort)
 
 	envelopeFrom := cfg.SMTPRelayUser
@@ -369,8 +366,8 @@ func forwardEmailViaRelay(cfg *Config, to string, originalFrom string, subject s
 
 	// Build a clean, simple email
 	newSubject := fmt.Sprintf("[Fwd: %s] %s", originalFrom, subject)
-	if len(newSubject) > 200 {
-		newSubject = newSubject[:197] + "..."
+	if len(newSubject) > 78 { // RFC 2822 recommends max 78 chars for Subject
+		newSubject = newSubject[:75] + "..."
 	}
 
 	var fullMsg bytes.Buffer
@@ -379,14 +376,91 @@ func forwardEmailViaRelay(cfg *Config, to string, originalFrom string, subject s
 	fullMsg.WriteString(fmt.Sprintf("Subject: %s\r\n", newSubject))
 	fullMsg.WriteString("MIME-Version: 1.0\r\n")
 	fullMsg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	fullMsg.WriteString("Content-Transfer-Encoding: 8bit\r\n")
 	fullMsg.WriteString("\r\n")
-
 	fullMsg.WriteString(fmt.Sprintf("Original Sender: %s\r\n", originalFrom))
-	fullMsg.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
+	fullMsg.WriteString(fmt.Sprintf("Original Subject: %s\r\n", subject))
 	fullMsg.WriteString("---\r\n\r\n")
 	fullMsg.WriteString(textBody)
 
-	return smtp.SendMail(addr, auth, envelopeFrom, []string{to}, fullMsg.Bytes())
+	// Use low-level SMTP client for better control and debugging
+	log.Printf("[Relay] Connecting to %s...", addr)
+
+	conn, err := net.DialTimeout("tcp", addr, 30*time.Second)
+	if err != nil {
+		return fmt.Errorf("dial failed: %v", err)
+	}
+
+	c, err := smtp.NewClient(conn, cfg.SMTPRelayHost)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("new client failed: %v", err)
+	}
+	defer c.Close()
+
+	// Say hello
+	if err := c.Hello("localhost"); err != nil {
+		return fmt.Errorf("HELO failed: %v", err)
+	}
+
+	// STARTTLS if available (required by 163.com on port 25)
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		log.Printf("[Relay] Starting TLS...")
+		tlsConfig := &tls.Config{
+			ServerName:         cfg.SMTPRelayHost,
+			InsecureSkipVerify: false,
+		}
+		if err := c.StartTLS(tlsConfig); err != nil {
+			log.Printf("[Relay] STARTTLS failed: %v, trying without TLS", err)
+		}
+	}
+
+	// Authenticate
+	if cfg.SMTPRelayUser != "" && cfg.SMTPRelayPass != "" {
+		log.Printf("[Relay] Authenticating as %s...", cfg.SMTPRelayUser)
+		auth := smtp.PlainAuth("", cfg.SMTPRelayUser, cfg.SMTPRelayPass, cfg.SMTPRelayHost)
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("auth failed: %v", err)
+		}
+	}
+
+	// MAIL FROM
+	log.Printf("[Relay] MAIL FROM: %s", envelopeFrom)
+	if err := c.Mail(envelopeFrom); err != nil {
+		return fmt.Errorf("MAIL FROM failed: %v", err)
+	}
+
+	// RCPT TO
+	log.Printf("[Relay] RCPT TO: %s", to)
+	if err := c.Rcpt(to); err != nil {
+		return fmt.Errorf("RCPT TO failed: %v", err)
+	}
+
+	// DATA
+	log.Printf("[Relay] Sending DATA...")
+	wc, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("DATA command failed: %v", err)
+	}
+
+	msgBytes := fullMsg.Bytes()
+	log.Printf("[Relay] Writing %d bytes...", len(msgBytes))
+
+	_, err = wc.Write(msgBytes)
+	if err != nil {
+		wc.Close()
+		return fmt.Errorf("write data failed: %v", err)
+	}
+
+	if err = wc.Close(); err != nil {
+		return fmt.Errorf("close data failed: %v", err)
+	}
+
+	log.Printf("[Relay] Sending QUIT...")
+	c.Quit()
+
+	log.Printf("[Relay] Email sent successfully")
+	return nil
 }
 
 // forwardEmailDirectly looks up MX records and delivers mail directly
