@@ -9,23 +9,21 @@ import (
 
 // Domain represents a managed domain (for verification/instruction purposes)
 type Domain struct {
-	ID        uint           `gorm:"primaryKey" json:"id"`
-	Name      string         `gorm:"uniqueIndex;not null" json:"name"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"uniqueIndex;not null" json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Account represents an email account or forwarding rule
 type Account struct {
-	ID          uint           `gorm:"primaryKey" json:"id"`
-	Pattern     string         `gorm:"uniqueIndex;not null" json:"pattern"` // Regex or wildcards like *@domain.com
-	ForwardTo   string         `gorm:"not null" json:"forward_to"`          // Target email(s), comma separated
-	Description string         `json:"description"`
-	HitCount    int64          `gorm:"default:0" json:"hit_count"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Pattern     string    `gorm:"uniqueIndex;not null" json:"pattern"` // Regex or wildcards like *@domain.com
+	ForwardTo   string    `gorm:"not null" json:"forward_to"`          // Target email(s), comma separated
+	Description string    `json:"description"`
+	HitCount    int64     `gorm:"default:0" json:"hit_count"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Log represents a forwarding log
@@ -34,8 +32,8 @@ type Log struct {
 	From      string    `gorm:"index" json:"from"`
 	To        string    `gorm:"index" json:"to"`
 	Subject   string    `json:"subject"`
-	Content   string    `json:"content"`    // Decoded text/plain content (truncated)
-	Raw       string    `json:"raw"`        // Raw RFC822 content (truncated)
+	Content   string    `json:"content"` // Decoded text/plain content (truncated)
+	Raw       string    `json:"raw"`     // Raw RFC822 content (truncated)
 	Status    string    `json:"status"`  // "success", "failed"
 	Error     string    `json:"error,omitempty"`
 	ClientIP  string    `json:"client_ip"`

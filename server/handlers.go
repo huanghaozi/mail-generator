@@ -33,7 +33,8 @@ func CreateDomain(c *gin.Context) {
 
 func DeleteDomain(c *gin.Context) {
 	id := c.Param("id")
-	if err := DB.Delete(&Domain{}, id).Error; err != nil {
+	// Use Unscoped() for hard delete to avoid UNIQUE constraint issues
+	if err := DB.Unscoped().Delete(&Domain{}, id).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -86,7 +87,8 @@ func UpdateAccount(c *gin.Context) {
 
 func DeleteAccount(c *gin.Context) {
 	id := c.Param("id")
-	if err := DB.Delete(&Account{}, id).Error; err != nil {
+	// Use Unscoped() for hard delete to avoid UNIQUE constraint issues
+	if err := DB.Unscoped().Delete(&Account{}, id).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -115,4 +117,3 @@ func GetLogs(c *gin.Context) {
 		"page":  page,
 	})
 }
-
