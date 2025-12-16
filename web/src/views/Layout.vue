@@ -3,19 +3,19 @@
     <a-layout-sider v-model:collapsed="collapsed" collapsible>
       <div class="logo">MailGen</div>
       <a-menu v-model:selectedKeys="selectedKeys" theme="dark" mode="inline">
-        <a-menu-item key="1">
+        <a-menu-item key="/domains">
           <router-link to="/domains">
             <global-outlined />
             <span>{{ $t('menu.domains') }}</span>
           </router-link>
         </a-menu-item>
-        <a-menu-item key="2">
+        <a-menu-item key="/accounts">
           <router-link to="/accounts">
             <user-outlined />
             <span>{{ $t('menu.accounts') }}</span>
           </router-link>
         </a-menu-item>
-        <a-menu-item key="3">
+        <a-menu-item key="/logs">
           <router-link to="/logs">
             <file-text-outlined />
             <span>{{ $t('menu.logs') }}</span>
@@ -50,13 +50,22 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { GlobalOutlined, UserOutlined, FileTextOutlined, TranslationOutlined } from '@ant-design/icons-vue';
 import { useI18n } from 'vue-i18n';
 
+const route = useRoute();
 const collapsed = ref(false);
-const selectedKeys = ref(['1']);
+const selectedKeys = ref<string[]>([route.path]);
 const { locale } = useI18n();
+
+watch(
+  () => route.path,
+  (newPath) => {
+    selectedKeys.value = [newPath];
+  }
+);
 
 const changeLocale = (lang: string) => {
   locale.value = lang;

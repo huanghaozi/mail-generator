@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
 	"net"
 	"net/smtp"
 	"regexp"
@@ -14,6 +18,8 @@ import (
 	"time"
 
 	gosmtp "github.com/emersion/go-smtp"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 type Backend struct {
@@ -41,13 +47,11 @@ func (s *Session) Mail(from string, opts *gosmtp.MailOptions) error {
 }
 
 func (s *Session) Rcpt(to string, opts *gosmtp.RcptOptions) error {
-	// 1. Parse domain
 	parts := strings.Split(to, "@")
 	if len(parts) != 2 {
 		return errors.New("invalid address")
 	}
 
-	// 2. Find matching rule in DB
 	var accounts []Account
 	DB.Find(&accounts)
 
@@ -73,11 +77,17 @@ func (s *Session) Data(r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	data := buf.String()
+	rawData := buf.String()
 
-	// Log the attempt
+	// Parse the email
+	subject := extractSubject(rawData)
+	textBody := extractTextBody(rawData)
+
+	// Decode subject if encoded
+	decodedSubject := decodeRFC2047(subject)
+
 	// Limit content length for DB
-	contentToLog := data
+	contentToLog := textBody
 	if len(contentToLog) > 10000 {
 		contentToLog = contentToLog[:10000] + "...(truncated)"
 	}
@@ -85,23 +95,21 @@ func (s *Session) Data(r io.Reader) error {
 	logEntry := Log{
 		From:      s.From,
 		To:        s.To,
-		Subject:   extractSubject(data),
+		Subject:   decodedSubject,
 		Content:   contentToLog,
 		Status:    "processing",
-		ClientIP:  "", // Context not passed easily in this lib
+		ClientIP:  "",
 		CreatedAt: time.Now(),
 	}
 	DB.Create(&logEntry)
 
 	// Forward asynchronously
-	go func(l Log, rule Account, content string, cfg *Config) {
+	go func(l Log, rule Account, originalFrom string, decodedSubj string, body string, cfg *Config) {
 		var err error
 		if cfg.SMTPRelayHost != "" {
-			// Relay Mode
-			err = forwardEmailViaRelay(cfg, rule.ForwardTo, content)
+			err = forwardEmailViaRelay(cfg, rule.ForwardTo, originalFrom, decodedSubj, body)
 		} else {
-			// Direct Send Mode
-			err = forwardEmailDirectly(cfg, rule.ForwardTo, content)
+			err = forwardEmailDirectly(cfg, rule.ForwardTo, originalFrom, decodedSubj, body)
 		}
 
 		status := "success"
@@ -114,15 +122,13 @@ func (s *Session) Data(r io.Reader) error {
 			log.Printf("Successfully forwarded email to %s", rule.ForwardTo)
 		}
 
-		// Update Log
 		DB.Model(&l).Updates(map[string]interface{}{
 			"status": status,
 			"error":  errMsg,
 		})
 
-		// Update Hit Count
 		DB.Model(&rule).Update("hit_count", rule.HitCount+1)
-	}(logEntry, *s.Rule, data, s.Config)
+	}(logEntry, *s.Rule, s.From, decodedSubject, textBody, s.Config)
 
 	return nil
 }
@@ -133,80 +139,239 @@ func (s *Session) Logout() error {
 	return nil
 }
 
+// decodeRFC2047 decodes RFC 2047 encoded-word (e.g. =?gb2312?B?...?=)
+func decodeRFC2047(s string) string {
+	dec := new(mime.WordDecoder)
+	dec.CharsetReader = charsetReader
+	decoded, err := dec.DecodeHeader(s)
+	if err != nil {
+		return s
+	}
+	return decoded
+}
+
+// charsetReader returns a reader that converts charset to UTF-8
+func charsetReader(charset string, input io.Reader) (io.Reader, error) {
+	charset = strings.ToLower(charset)
+	switch charset {
+	case "gb2312", "gbk", "gb18030":
+		return transform.NewReader(input, simplifiedchinese.GBK.NewDecoder()), nil
+	default:
+		return input, nil
+	}
+}
+
 func extractSubject(body string) string {
-	var subject string
-	// Try to find Subject header
-	// Basic implementation
 	headerEnd := strings.Index(body, "\r\n\r\n")
 	if headerEnd == -1 {
 		headerEnd = len(body)
 	}
 	headers := body[:headerEnd]
 
-	lines := strings.Split(headers, "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "Subject: ") || strings.HasPrefix(line, "subject: ") {
-			subject = strings.TrimSpace(line[9:])
-			break
+	lines := strings.Split(headers, "\r\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.ToLower(line), "subject:") {
+			subject := strings.TrimSpace(line[8:])
+			// Handle folded headers
+			for j := i + 1; j < len(lines); j++ {
+				if len(lines[j]) > 0 && (lines[j][0] == ' ' || lines[j][0] == '\t') {
+					subject += strings.TrimSpace(lines[j])
+				} else {
+					break
+				}
+			}
+			return subject
 		}
 	}
-	return subject
+	return ""
 }
 
-// forwardEmailViaRelay sends email using a configured SMTP relay (e.g. Gmail)
-func forwardEmailViaRelay(cfg *Config, to string, body string) error {
-	// Prepare authentication
+func extractTextBody(rawEmail string) string {
+	// Split headers and body
+	parts := strings.SplitN(rawEmail, "\r\n\r\n", 2)
+	if len(parts) < 2 {
+		return ""
+	}
+	headers := parts[0]
+	body := parts[1]
+
+	// Get Content-Type
+	contentType := ""
+	boundary := ""
+	transferEncoding := ""
+	charset := "utf-8"
+
+	headerLines := strings.Split(headers, "\r\n")
+	for i, line := range headerLines {
+		lowerLine := strings.ToLower(line)
+		if strings.HasPrefix(lowerLine, "content-type:") {
+			contentType = line[13:]
+			// Handle folded headers
+			for j := i + 1; j < len(headerLines); j++ {
+				if len(headerLines[j]) > 0 && (headerLines[j][0] == ' ' || headerLines[j][0] == '\t') {
+					contentType += headerLines[j]
+				} else {
+					break
+				}
+			}
+		}
+		if strings.HasPrefix(lowerLine, "content-transfer-encoding:") {
+			transferEncoding = strings.TrimSpace(line[26:])
+		}
+	}
+
+	// Parse Content-Type
+	if contentType != "" {
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(contentType))
+		if err == nil {
+			if b, ok := params["boundary"]; ok {
+				boundary = b
+			}
+			if c, ok := params["charset"]; ok {
+				charset = c
+			}
+
+			// If multipart, extract text/plain part
+			if strings.HasPrefix(mediaType, "multipart/") && boundary != "" {
+				return extractFromMultipart(body, boundary)
+			}
+		}
+	}
+
+	// Single part message - decode it
+	return decodeBody(body, transferEncoding, charset)
+}
+
+func extractFromMultipart(body string, boundary string) string {
+	reader := multipart.NewReader(strings.NewReader(body), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			break
+		}
+
+		partContentType := part.Header.Get("Content-Type")
+		partEncoding := part.Header.Get("Content-Transfer-Encoding")
+
+		mediaType, params, _ := mime.ParseMediaType(partContentType)
+		charset := "utf-8"
+		if c, ok := params["charset"]; ok {
+			charset = c
+		}
+
+		// Prefer text/plain
+		if strings.HasPrefix(mediaType, "text/plain") {
+			content, _ := io.ReadAll(part)
+			return decodeBody(string(content), partEncoding, charset)
+		}
+
+		// If nested multipart, recurse
+		if strings.HasPrefix(mediaType, "multipart/") {
+			if b, ok := params["boundary"]; ok {
+				content, _ := io.ReadAll(part)
+				result := extractFromMultipart(string(content), b)
+				if result != "" {
+					return result
+				}
+			}
+		}
+	}
+
+	// If no text/plain found, try text/html as fallback
+	reader = multipart.NewReader(strings.NewReader(body), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			break
+		}
+
+		partContentType := part.Header.Get("Content-Type")
+		partEncoding := part.Header.Get("Content-Transfer-Encoding")
+
+		mediaType, params, _ := mime.ParseMediaType(partContentType)
+		charset := "utf-8"
+		if c, ok := params["charset"]; ok {
+			charset = c
+		}
+
+		if strings.HasPrefix(mediaType, "text/html") {
+			content, _ := io.ReadAll(part)
+			decoded := decodeBody(string(content), partEncoding, charset)
+			// Strip HTML tags (simple)
+			return stripHTML(decoded)
+		}
+	}
+
+	return ""
+}
+
+func decodeBody(body string, encoding string, charset string) string {
+	var decoded []byte
+	var err error
+
+	encoding = strings.ToLower(strings.TrimSpace(encoding))
+
+	switch encoding {
+	case "base64":
+		decoded, err = base64.StdEncoding.DecodeString(strings.ReplaceAll(body, "\r\n", ""))
+		if err != nil {
+			decoded = []byte(body)
+		}
+	case "quoted-printable":
+		reader := quotedprintable.NewReader(strings.NewReader(body))
+		decoded, err = io.ReadAll(reader)
+		if err != nil {
+			decoded = []byte(body)
+		}
+	default:
+		decoded = []byte(body)
+	}
+
+	// Convert charset to UTF-8
+	charset = strings.ToLower(charset)
+	switch charset {
+	case "gb2312", "gbk", "gb18030":
+		utf8Bytes, _, err := transform.Bytes(simplifiedchinese.GBK.NewDecoder(), decoded)
+		if err == nil {
+			return string(utf8Bytes)
+		}
+	}
+
+	return string(decoded)
+}
+
+func stripHTML(s string) string {
+	// Simple HTML tag removal
+	re := regexp.MustCompile(`<[^>]*>`)
+	result := re.ReplaceAllString(s, "")
+	// Decode common HTML entities
+	result = strings.ReplaceAll(result, "&nbsp;", " ")
+	result = strings.ReplaceAll(result, "&lt;", "<")
+	result = strings.ReplaceAll(result, "&gt;", ">")
+	result = strings.ReplaceAll(result, "&amp;", "&")
+	result = strings.ReplaceAll(result, "&quot;", "\"")
+	return strings.TrimSpace(result)
+}
+
+// forwardEmailViaRelay sends email using a configured SMTP relay
+func forwardEmailViaRelay(cfg *Config, to string, originalFrom string, subject string, textBody string) error {
 	var auth smtp.Auth
 	if cfg.SMTPRelayUser != "" && cfg.SMTPRelayPass != "" {
 		auth = smtp.PlainAuth("", cfg.SMTPRelayUser, cfg.SMTPRelayPass, cfg.SMTPRelayHost)
 	}
 
-	// Address to connect to
 	addr := fmt.Sprintf("%s:%s", cfg.SMTPRelayHost, cfg.SMTPRelayPort)
 
-	// When using relay, we MUST use the auth user as Envelope From (MAIL FROM)
 	envelopeFrom := cfg.SMTPRelayUser
 	if envelopeFrom == "" {
 		envelopeFrom = cfg.DefaultEnvelope
 	}
 
-	// --- Construct a completely new, safe email ---
-
-	// 1. Parse simple headers for Subject/From display
-	headerEnd := strings.Index(body, "\r\n\r\n")
-	if headerEnd == -1 {
-		headerEnd = 0
-	}
-	originalHeaders := body[:headerEnd]
-
-	var originalFrom, originalSubject string
-	lines := strings.Split(originalHeaders, "\r\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "From: ") {
-			originalFrom = strings.TrimSpace(line[6:])
-		} else if strings.HasPrefix(line, "Subject: ") {
-			originalSubject = strings.TrimSpace(line[9:])
-		}
-	}
-	if originalFrom == "" {
-		originalFrom = "Unknown Sender"
-	}
-	if originalSubject == "" {
-		originalSubject = "No Subject"
-	}
-
-	// 2. Format new Subject
-	newSubject := fmt.Sprintf("[Fwd: %s] %s", originalFrom, originalSubject)
+	// Build a clean, simple email
+	newSubject := fmt.Sprintf("[Fwd: %s] %s", originalFrom, subject)
 	if len(newSubject) > 200 {
 		newSubject = newSubject[:197] + "..."
 	}
-
-	// 3. Construct Body
-	// To safely include ANY original content (binary, html, attachments),
-	// we will wrap the *entire* original raw message as a text/plain attachment
-	// or just dump it inside but safe from protocol injection.
-	// Actually, best user experience for "viewing" is tricky without parsing.
-	// Let's just include a safe plain text notice + the raw content in a safe way.
 
 	var fullMsg bytes.Buffer
 	fullMsg.WriteString(fmt.Sprintf("From: %s\r\n", envelopeFrom))
@@ -214,40 +379,24 @@ func forwardEmailViaRelay(cfg *Config, to string, body string) error {
 	fullMsg.WriteString(fmt.Sprintf("Subject: %s\r\n", newSubject))
 	fullMsg.WriteString("MIME-Version: 1.0\r\n")
 	fullMsg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
-	fullMsg.WriteString("\r\n") // End of Headers
+	fullMsg.WriteString("\r\n")
 
-	fullMsg.WriteString("--- Forwarded Message Info ---\r\n")
 	fullMsg.WriteString(fmt.Sprintf("Original Sender: %s\r\n", originalFrom))
-	fullMsg.WriteString(fmt.Sprintf("Original Subject: %s\r\n", originalSubject))
-	fullMsg.WriteString("------------------------------\r\n")
-	fullMsg.WriteString("\r\n")
-	fullMsg.WriteString("(The original email content may be complex HTML or contain attachments.\r\n")
-	fullMsg.WriteString(" Please check the Web Dashboard to view the full raw content correctly.)\r\n")
-	fullMsg.WriteString("\r\n")
-	fullMsg.WriteString("--- Raw Content Snippet (First 500 chars) ---\r\n")
-
-	// Safely grab a snippet
-	snippetLen := 500
-	if len(body) < 500 {
-		snippetLen = len(body)
-	}
-	// Sanitize snippet to prevent header injection if we were to act on it,
-	// but here it is just body text.
-	fullMsg.WriteString(body[:snippetLen])
-	fullMsg.WriteString("\r\n...\r\n")
+	fullMsg.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
+	fullMsg.WriteString("---\r\n\r\n")
+	fullMsg.WriteString(textBody)
 
 	return smtp.SendMail(addr, auth, envelopeFrom, []string{to}, fullMsg.Bytes())
 }
 
 // forwardEmailDirectly looks up MX records and delivers mail directly
-func forwardEmailDirectly(cfg *Config, to string, body string) error {
+func forwardEmailDirectly(cfg *Config, to string, originalFrom string, subject string, textBody string) error {
 	parts := strings.Split(to, "@")
 	if len(parts) != 2 {
 		return errors.New("invalid to address")
 	}
 	domain := parts[1]
 
-	// 1. Lookup MX records
 	mxs, err := net.LookupMX(domain)
 	if err != nil {
 		return fmt.Errorf("mx lookup failed: %v", err)
@@ -256,18 +405,34 @@ func forwardEmailDirectly(cfg *Config, to string, body string) error {
 		return errors.New("no mx records found")
 	}
 
-	// Sort by preference
 	sort.Slice(mxs, func(i, j int) bool {
 		return mxs[i].Pref < mxs[j].Pref
 	})
 
-	// 2. Try each MX record
+	// Build message
+	newSubject := fmt.Sprintf("[Fwd: %s] %s", originalFrom, subject)
+	if len(newSubject) > 200 {
+		newSubject = newSubject[:197] + "..."
+	}
+
+	var fullMsg bytes.Buffer
+	fullMsg.WriteString(fmt.Sprintf("From: %s\r\n", cfg.DefaultEnvelope))
+	fullMsg.WriteString(fmt.Sprintf("To: %s\r\n", to))
+	fullMsg.WriteString(fmt.Sprintf("Subject: %s\r\n", newSubject))
+	fullMsg.WriteString("MIME-Version: 1.0\r\n")
+	fullMsg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	fullMsg.WriteString("\r\n")
+
+	fullMsg.WriteString(fmt.Sprintf("Original Sender: %s\r\n", originalFrom))
+	fullMsg.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
+	fullMsg.WriteString("---\r\n\r\n")
+	fullMsg.WriteString(textBody)
+
 	var lastErr error
 	for _, mx := range mxs {
 		address := mx.Host + ":25"
 		log.Printf("Attempting direct delivery to %s (%s)", address, to)
 
-		// Connect to the remote SMTP server with timeout
 		conn, err := net.DialTimeout("tcp", address, 10*time.Second)
 		if err != nil {
 			lastErr = err
@@ -279,25 +444,21 @@ func forwardEmailDirectly(cfg *Config, to string, body string) error {
 		if err != nil {
 			conn.Close()
 			lastErr = err
-			log.Printf("Failed to create SMTP client for %s: %v", address, err)
 			continue
 		}
 
-		// Set the sender (Envelope From)
 		if err := c.Mail(cfg.DefaultEnvelope); err != nil {
 			lastErr = err
 			c.Close()
 			continue
 		}
 
-		// Set the recipient
 		if err := c.Rcpt(to); err != nil {
 			lastErr = err
 			c.Close()
 			continue
 		}
 
-		// Send the data
 		wc, err := c.Data()
 		if err != nil {
 			lastErr = err
@@ -305,7 +466,7 @@ func forwardEmailDirectly(cfg *Config, to string, body string) error {
 			continue
 		}
 
-		_, err = wc.Write([]byte(body))
+		_, err = wc.Write(fullMsg.Bytes())
 		if err != nil {
 			lastErr = err
 			wc.Close()
@@ -321,7 +482,7 @@ func forwardEmailDirectly(cfg *Config, to string, body string) error {
 		}
 
 		c.Quit()
-		return nil // Success
+		return nil
 	}
 
 	if lastErr != nil {
@@ -337,8 +498,8 @@ func StartSMTPServer(cfg *Config) {
 	s.Domain = "localhost"
 	s.ReadTimeout = 10 * time.Second
 	s.WriteTimeout = 10 * time.Second
-	s.MaxMessageBytes = 1024 * 1024 * 10 // 10MB
-	s.AllowInsecureAuth = true           // Since we don't really do auth, and often behind proxy/container
+	s.MaxMessageBytes = 1024 * 1024 * 10
+	s.AllowInsecureAuth = true
 
 	log.Printf("Starting SMTP server on %s", s.Addr)
 	if err := s.ListenAndServe(); err != nil {

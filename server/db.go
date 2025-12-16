@@ -34,7 +34,8 @@ type Log struct {
 	From      string    `gorm:"index" json:"from"`
 	To        string    `gorm:"index" json:"to"`
 	Subject   string    `json:"subject"`
-	Content   string    `json:"content"` // Store email content (truncated if too large)
+	Content   string    `json:"content"`    // Decoded text/plain content (truncated)
+	Raw       string    `json:"raw"`        // Raw RFC822 content (truncated)
 	Status    string    `json:"status"`  // "success", "failed"
 	Error     string    `json:"error,omitempty"`
 	ClientIP  string    `json:"client_ip"`
