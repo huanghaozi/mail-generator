@@ -33,6 +33,7 @@ type Log struct {
 	To        string    `gorm:"index" json:"to"`
 	Subject   string    `json:"subject"`
 	Content   string    `json:"content"` // Decoded text/plain content (truncated)
+	HTML      string    `json:"html"`    // Raw HTML content (truncated)
 	Raw       string    `json:"raw"`     // Raw RFC822 content (truncated)
 	Status    string    `json:"status"`  // "success", "failed"
 	Error     string    `json:"error,omitempty"`

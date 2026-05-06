@@ -18,8 +18,18 @@
       </template>
     </a-table>
 
-    <a-modal v-model:open="open" :title="$t('log.contentTitle')" width="800px" :footer="null">
-      <pre style="white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto;">{{ currentContent }}</pre>
+    <a-modal v-model:open="open" :title="$t('log.contentTitle')" width="900px" :footer="null">
+      <a-tabs v-model:activeKey="activeTabKey">
+        <a-tab-pane key="text" tab="Text">
+          <pre style="white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto;">{{ currentContent }}</pre>
+        </a-tab-pane>
+        <a-tab-pane key="html" tab="HTML" v-if="currentHTML">
+          <iframe :srcdoc="currentHTML" style="width: 100%; height: 600px; border: 1px solid #ddd;"></iframe>
+        </a-tab-pane>
+        <a-tab-pane key="raw" tab="Raw" v-if="currentRaw">
+          <pre style="white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto;">{{ currentRaw }}</pre>
+        </a-tab-pane>
+      </a-tabs>
     </a-modal>
   </div>
 </template>
@@ -38,6 +48,9 @@ const pagination = ref({
 });
 const open = ref(false);
 const currentContent = ref('');
+const currentHTML = ref('');
+const currentRaw = ref('');
+const activeTabKey = ref('text');
 
 const columns = computed(() => [
   { title: t('common.id'), dataIndex: 'id', key: 'id' },
@@ -68,6 +81,9 @@ const handleTableChange = (pag: any) => {
 
 const showContent = (record: any) => {
   currentContent.value = record.content || 'No Content';
+  currentHTML.value = record.html || '';
+  currentRaw.value = record.raw || '';
+  activeTabKey.value = 'text';
   open.value = true;
 };
 

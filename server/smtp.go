@@ -83,6 +83,7 @@ func (s *Session) Data(r io.Reader) error {
 	// Parse the email
 	subject := extractSubject(rawData)
 	textBody := extractTextBody(rawData)
+	htmlBody := extractHTMLBody(rawData)
 
 	// Decode subject if encoded
 	decodedSubject := decodeRFC2047(subject)
@@ -92,12 +93,22 @@ func (s *Session) Data(r io.Reader) error {
 	if len(contentToLog) > 10000 {
 		contentToLog = contentToLog[:10000] + "...(truncated)"
 	}
+	htmlToLog := htmlBody
+	if len(htmlToLog) > 50000 {
+		htmlToLog = htmlToLog[:50000] + "...(truncated)"
+	}
+	rawToLog := rawData
+	if len(rawToLog) > 50000 {
+		rawToLog = rawToLog[:50000] + "...(truncated)"
+	}
 
 	logEntry := Log{
 		From:      s.From,
 		To:        s.To,
 		Subject:   decodedSubject,
 		Content:   contentToLog,
+		HTML:      htmlToLog,
+		Raw:       rawToLog,
 		Status:    "processing",
 		ClientIP:  "",
 		CreatedAt: time.Now(),
@@ -209,6 +220,14 @@ func extractSubject(body string) string {
 }
 
 func extractTextBody(rawEmail string) string {
+	return extractBodyByType(rawEmail, "text/plain")
+}
+
+func extractHTMLBody(rawEmail string) string {
+	return extractBodyByType(rawEmail, "text/html")
+}
+
+func extractBodyByType(rawEmail string, targetType string) string {
 	// Split headers and body
 	parts := strings.SplitN(rawEmail, "\r\n\r\n", 2)
 	if len(parts) < 2 {
@@ -253,18 +272,38 @@ func extractTextBody(rawEmail string) string {
 				charset = c
 			}
 
-			// If multipart, extract text/plain part
+			// If multipart, extract target part
 			if strings.HasPrefix(mediaType, "multipart/") && boundary != "" {
-				return extractFromMultipart(body, boundary)
+				result := extractFromMultipartByType(body, boundary, targetType)
+				if result != "" {
+					return result
+				}
+				// For text/plain fallback to raw html
+				if targetType == "text/plain" {
+					htmlResult := extractFromMultipartByType(body, boundary, "text/html")
+					if htmlResult != "" {
+						return htmlResult
+					}
+				}
+				return ""
 			}
 		}
 	}
 
-	// Single part message - decode it
-	return decodeBody(body, transferEncoding, charset)
+	// Single part message
+	mediaType, _, _ := mime.ParseMediaType(strings.TrimSpace(contentType))
+	if mediaType == targetType || (targetType == "text/plain" && mediaType == "text/html") {
+		decoded := decodeBody(body, transferEncoding, charset)
+		return decoded
+	}
+	return ""
 }
 
 func extractFromMultipart(body string, boundary string) string {
+	return extractFromMultipartByType(body, boundary, "text/plain")
+}
+
+func extractFromMultipartByType(body string, boundary string, targetType string) string {
 	reader := multipart.NewReader(strings.NewReader(body), boundary)
 	for {
 		part, err := reader.NextPart()
@@ -281,8 +320,7 @@ func extractFromMultipart(body string, boundary string) string {
 			charset = c
 		}
 
-		// Prefer text/plain
-		if strings.HasPrefix(mediaType, "text/plain") {
+		if strings.HasPrefix(mediaType, targetType) {
 			content, _ := io.ReadAll(part)
 			return decodeBody(string(content), partEncoding, charset)
 		}
@@ -291,39 +329,13 @@ func extractFromMultipart(body string, boundary string) string {
 		if strings.HasPrefix(mediaType, "multipart/") {
 			if b, ok := params["boundary"]; ok {
 				content, _ := io.ReadAll(part)
-				result := extractFromMultipart(string(content), b)
+				result := extractFromMultipartByType(string(content), b, targetType)
 				if result != "" {
 					return result
 				}
 			}
 		}
 	}
-
-	// If no text/plain found, try text/html as fallback
-	reader = multipart.NewReader(strings.NewReader(body), boundary)
-	for {
-		part, err := reader.NextPart()
-		if err != nil {
-			break
-		}
-
-		partContentType := part.Header.Get("Content-Type")
-		partEncoding := part.Header.Get("Content-Transfer-Encoding")
-
-		mediaType, params, _ := mime.ParseMediaType(partContentType)
-		charset := "utf-8"
-		if c, ok := params["charset"]; ok {
-			charset = c
-		}
-
-		if strings.HasPrefix(mediaType, "text/html") {
-			content, _ := io.ReadAll(part)
-			decoded := decodeBody(string(content), partEncoding, charset)
-			// Strip HTML tags (simple)
-			return stripHTML(decoded)
-		}
-	}
-
 	return ""
 }
 
@@ -360,20 +372,6 @@ func decodeBody(body string, encoding string, charset string) string {
 	}
 
 	return string(decoded)
-}
-
-func stripHTML(s string) string {
-	// Simple HTML tag removal
-	re := regexp.MustCompile(`<[^>]*>`)
-	result := re.ReplaceAllString(s, "")
-	// Decode common HTML entities
-	// NOTE: &amp; MUST be replaced FIRST so nested entities like &amp;nbsp; decode correctly
-	result = strings.ReplaceAll(result, "&amp;", "&")
-	result = strings.ReplaceAll(result, "&nbsp;", " ")
-	result = strings.ReplaceAll(result, "&lt;", "<")
-	result = strings.ReplaceAll(result, "&gt;", ">")
-	result = strings.ReplaceAll(result, "&quot;", "\"")
-	return strings.TrimSpace(result)
 }
 
 // forwardEmailViaRelay sends email using a configured SMTP relay (e.g. 163.com)
